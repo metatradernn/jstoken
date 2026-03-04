@@ -20,8 +20,6 @@ const Index: React.FC = () => {
   const [state, setState] = useState<AppState>("idle");
   const [tokenResult, setTokenResult] = useState<TokenResult | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
-  const [debugInfo, setDebugInfo] = useState("");
-  const [diagResult, setDiagResult] = useState<string>("");
 
   useEffect(() => {
     ready();
@@ -43,7 +41,6 @@ const Index: React.FC = () => {
     }
 
     setState("loading");
-    setDebugInfo("");
 
     const response = await supabase.functions.invoke("check-subscription", {
       body: {
@@ -62,24 +59,14 @@ const Index: React.FC = () => {
       setState("success");
     } else {
       setErrorMessage(data?.message || "Произошла ошибка. Попробуйте позже.");
-      if (data?.debug) setDebugInfo(data.debug);
       setState("error");
     }
-  };
-
-  const handleDiagnose = async () => {
-    setDiagResult("Проверяем...");
-    const response = await supabase.functions.invoke("debug-chat", {
-      body: { telegramId: telegramId },
-    });
-    setDiagResult(JSON.stringify(response.data, null, 2));
   };
 
   const handleReset = () => {
     setState("idle");
     setTokenResult(null);
     setErrorMessage("");
-    setDebugInfo("");
   };
 
   return (
@@ -93,7 +80,7 @@ const Index: React.FC = () => {
             <User className="w-4 h-4 text-zinc-400" />
             <span className="text-zinc-300 text-sm">{displayName}</span>
             {telegramId && (
-              <span className="text-zinc-600 text-xs ml-1">ID: {telegramId}</span>
+              <span className="text-zinc-600 text-xs">ID: {telegramId}</span>
             )}
           </div>
         )}
@@ -116,20 +103,6 @@ const Index: React.FC = () => {
               <Key className="w-5 h-5" />
               Получить токен
             </button>
-
-            {/* Diagnostic button */}
-            <button
-              onClick={handleDiagnose}
-              className="w-full max-w-sm bg-zinc-800 hover:bg-zinc-700 text-zinc-400 text-xs rounded-xl py-2 px-4 transition-all duration-200"
-            >
-              🔍 Диагностика
-            </button>
-
-            {diagResult && (
-              <div className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 max-h-64 overflow-auto">
-                <pre className="text-zinc-400 text-xs whitespace-pre-wrap break-all">{diagResult}</pre>
-              </div>
-            )}
           </div>
         )}
 
@@ -152,13 +125,6 @@ const Index: React.FC = () => {
         {state === "error" && (
           <div className="w-full max-w-sm mt-4">
             <ErrorMessage message={errorMessage} />
-            {debugInfo && (
-              <div className="mt-3 bg-zinc-900 border border-zinc-700 rounded-xl p-3">
-                <p className="text-zinc-500 text-xs font-mono break-all">
-                  Debug: {debugInfo}
-                </p>
-              </div>
-            )}
           </div>
         )}
 
