@@ -7,7 +7,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "lgsk2msw=2msmgms52";
+const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "8669465832:AAE8gjCvpwESWYNPLz4WjKxuQsHqJ0mnyGQ";
 const CHAT_ID = "-1002564995824";
 const SECRET = "jarvis159786max21";
 
