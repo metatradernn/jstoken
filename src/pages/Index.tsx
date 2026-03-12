@@ -42,23 +42,36 @@ const Index: React.FC = () => {
 
     setState("loading");
 
-    const response = await supabase.functions.invoke("check-subscription", {
-      body: {
-        telegramId: userId,
-        initData: initData,
-      },
-    });
-
-    const data = response.data;
-
-    if (data?.success) {
-      setTokenResult({
-        token: data.token,
-        isExisting: data.isExisting,
+    try {
+      const response = await supabase.functions.invoke("check-subscription", {
+        body: {
+          telegramId: userId,
+          initData: initData,
+        },
       });
-      setState("success");
-    } else {
-      setErrorMessage(data?.message || "Произошла ошибка. Попробуйте позже.");
+
+      if (response.error) {
+        console.error("Edge function error:", response.error);
+        setErrorMessage("Ошибка сервера. Попробуйте позже.");
+        setState("error");
+        return;
+      }
+
+      const data = response.data;
+
+      if (data?.success) {
+        setTokenResult({
+          token: data.token,
+          isExisting: data.isExisting,
+        });
+        setState("success");
+      } else {
+        setErrorMessage(data?.message || "Вы не приобрели Jarvis Max");
+        setState("error");
+      }
+    } catch (err) {
+      console.error("Unexpected error:", err);
+      setErrorMessage("Произошла непредвиденная ошибка. Попробуйте позже.");
       setState("error");
     }
   };
