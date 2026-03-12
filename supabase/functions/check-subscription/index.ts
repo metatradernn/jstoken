@@ -9,7 +9,106 @@ const corsHeaders = {
 
 const BOT_TOKEN = Deno.env.get("BOT_TOKEN") ?? "8669465832:AAE8gjCvpwESWYNPLz4WjKxuQsHqJ0mnyGQ";
 const CHAT_ID = "-1002564995824";
-const SECRET = "jarvis159786max21";
+
+// Rate limiting: max 5 requests per minute per IP
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(ip, { count: 1, resetAt: now + 60_000 });
+    return true;
+  }
+  if (entry.count >= 5) {
+    return false;
+  }
+  entry.count++;
+  return true;
+}
+
+// Validate Telegram WebApp initData using HMAC-SHA256
+async function validateTelegramInitData(initData: string): Promise<{ valid: boolean; userId?: number }> {
+  try {
+    if (!initData || initData.trim() === "") {
+      console.log("[check-subscription] No initData provided");
+      return { valid: false };
+    }
+
+    const params = new URLSearchParams(initData);
+    const hash = params.get("hash");
+    if (!hash) {
+      console.log("[check-subscription] No hash in initData");
+      return { valid: false };
+    }
+
+    // Build data-check-string: sorted key=value pairs (excluding hash)
+    params.delete("hash");
+    const dataCheckArr: string[] = [];
+    params.forEach((value, key) => {
+      dataCheckArr.push(`${key}=${value}`);
+    });
+    dataCheckArr.sort();
+    const dataCheckString = dataCheckArr.join("\n");
+
+    // HMAC-SHA256: key = HMAC-SHA256("WebAppData", bot_token), data = dataCheckString
+    const encoder = new TextEncoder();
+
+    const secretKeyRaw = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode("WebAppData"),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+
+    const secretKeyBytes = await crypto.subtle.sign(
+      "HMAC",
+      secretKeyRaw,
+      encoder.encode(BOT_TOKEN)
+    );
+
+    const hmacKey = await crypto.subtle.importKey(
+      "raw",
+      secretKeyBytes,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+
+    const signatureBytes = await crypto.subtle.sign(
+      "HMAC",
+      hmacKey,
+      encoder.encode(dataCheckString)
+    );
+
+    const computedHash = Array.from(new Uint8Array(signatureBytes))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    if (computedHash !== hash) {
+      console.log("[check-subscription] Hash mismatch — invalid initData");
+      return { valid: false };
+    }
+
+    // Check that initData is not older than 1 hour
+    const authDate = parseInt(params.get("auth_date") ?? "0", 10);
+    const now = Math.floor(Date.now() / 1000);
+    if (now - authDate > 3600) {
+      console.log("[check-subscription] initData expired");
+      return { valid: false };
+    }
+
+    // Extract user id
+    const userStr = params.get("user");
+    if (!userStr) return { valid: true };
+    const user = JSON.parse(userStr);
+    return { valid: true, userId: user.id };
+  } catch (e) {
+    console.error("[check-subscription] initData validation error:", e);
+    return { valid: false };
+  }
+}
 
 function generateToken(length: number = 30): string {
   const chars =
@@ -30,12 +129,29 @@ serve(async (req) => {
 
   console.log("[check-subscription] Request received");
 
-  const { telegramId, initData } = await req.json();
+  // Rate limiting
+  const clientIp =
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+    req.headers.get("x-real-ip") ??
+    "unknown";
 
-  if (!telegramId) {
-    console.log("[check-subscription] No telegramId provided");
+  if (!checkRateLimit(clientIp)) {
+    console.log("[check-subscription] Rate limit exceeded for IP:", clientIp);
     return new Response(
-      JSON.stringify({ error: "Telegram ID is required" }),
+      JSON.stringify({ success: false, message: "Слишком много запросов. Подождите минуту." }),
+      {
+        status: 429,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  let body: { telegramId?: number; initData?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return new Response(
+      JSON.stringify({ success: false, message: "Неверный формат запроса." }),
       {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -43,28 +159,64 @@ serve(async (req) => {
     );
   }
 
-  console.log(
-    "[check-subscription] Checking subscription for user:",
-    telegramId
-  );
+  const { telegramId, initData } = body;
 
-  // Check if user is a member of the chat
-  const telegramUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${CHAT_ID}&user_id=${telegramId}`;
+  // Validate Telegram initData signature
+  const validation = await validateTelegramInitData(initData ?? "");
 
-  console.log("[check-subscription] Calling Telegram API");
+  if (!validation.valid) {
+    console.log("[check-subscription] Invalid initData — request rejected");
+    return new Response(
+      JSON.stringify({
+        success: false,
+        message: "Доступ запрещён. Откройте приложение через Telegram.",
+      }),
+      {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
+  }
 
+  // Make sure the telegramId matches the one in initData (prevent spoofing)
+  if (validation.userId && validation.userId !== telegramId) {
+    console.log("[check-subscription] telegramId mismatch — possible spoofing attempt");
+    return new Response(
+      JSON.stringify({
+        success: false,
+        message: "Доступ запрещён.",
+      }),
+      {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  const userId = validation.userId ?? telegramId;
+
+  if (!userId) {
+    return new Response(
+      JSON.stringify({ success: false, message: "Telegram ID не найден." }),
+      {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  console.log("[check-subscription] Validated user:", userId);
+
+  // Check Telegram chat membership
+  const telegramUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${CHAT_ID}&user_id=${userId}`;
   const telegramResponse = await fetch(telegramUrl);
   const telegramData = await telegramResponse.json();
 
   console.log("[check-subscription] Telegram API response:", telegramData);
 
   if (!telegramData.ok) {
-    console.log("[check-subscription] Telegram API error:", telegramData);
     return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Вы не приобрели Jarvis Max",
-      }),
+      JSON.stringify({ success: false, message: "Вы не приобрели Jarvis Max" }),
       {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -73,17 +225,12 @@ serve(async (req) => {
   }
 
   const memberStatus = telegramData.result?.status;
-  console.log("[check-subscription] Member status:", memberStatus);
-
   const validStatuses = ["member", "administrator", "creator"];
 
   if (!validStatuses.includes(memberStatus)) {
-    console.log("[check-subscription] User is not a member, status:", memberStatus);
+    console.log("[check-subscription] Not a member, status:", memberStatus);
     return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Вы не приобрели Jarvis Max",
-      }),
+      JSON.stringify({ success: false, message: "Вы не приобрели Jarvis Max" }),
       {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -91,9 +238,8 @@ serve(async (req) => {
     );
   }
 
-  console.log("[check-subscription] User is a valid member, generating token");
+  console.log("[check-subscription] User is a valid member, processing token");
 
-  // User is a member — check if they already have a token
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const supabaseClient = createClient(supabaseUrl, supabaseKey);
@@ -102,7 +248,7 @@ serve(async (req) => {
   const { data: existingToken, error: fetchError } = await supabaseClient
     .from("tokens")
     .select("token, created_at")
-    .eq("telegram_id", String(telegramId))
+    .eq("telegram_id", String(userId))
     .maybeSingle();
 
   if (fetchError) {
@@ -110,7 +256,7 @@ serve(async (req) => {
   }
 
   if (existingToken) {
-    console.log("[check-subscription] Returning existing token for user:", telegramId);
+    console.log("[check-subscription] Returning existing token for user:", userId);
     return new Response(
       JSON.stringify({
         success: true,
@@ -125,25 +271,17 @@ serve(async (req) => {
     );
   }
 
-  // Generate new token
+  // Generate and save new token
   const newToken = generateToken(30);
-
-  console.log("[check-subscription] Saving new token for user:", telegramId);
 
   const { error: insertError } = await supabaseClient
     .from("tokens")
-    .insert({
-      telegram_id: String(telegramId),
-      token: newToken,
-    });
+    .insert({ telegram_id: String(userId), token: newToken });
 
   if (insertError) {
     console.error("[check-subscription] DB insert error:", insertError);
     return new Response(
-      JSON.stringify({
-        success: false,
-        message: "Ошибка при генерации токена. Попробуйте позже.",
-      }),
+      JSON.stringify({ success: false, message: "Ошибка при генерации токена. Попробуйте позже." }),
       {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -151,7 +289,7 @@ serve(async (req) => {
     );
   }
 
-  console.log("[check-subscription] Token generated successfully");
+  console.log("[check-subscription] Token generated successfully for user:", userId);
 
   return new Response(
     JSON.stringify({
